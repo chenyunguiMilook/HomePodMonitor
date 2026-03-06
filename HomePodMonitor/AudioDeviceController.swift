@@ -64,11 +64,10 @@ final class AudioDeviceController: ObservableObject {
                     return
                 }
 
-                let canInteractWithSoundMenu = self.canInteractWithSoundMenu
                 self.evaluateAudioRoute(
                     reason: "定时巡检",
-                    allowsMenuInteraction: canInteractWithSoundMenu,
-                    refreshSnapshotBeforeEvaluation: canInteractWithSoundMenu
+                    allowsMenuInteraction: self.canInteractWithSoundMenu,
+                    refreshSnapshotBeforeEvaluation: false
                 )
             }
         }
@@ -372,7 +371,7 @@ final class AudioDeviceController: ObservableObject {
                     self.evaluateAudioRoute(
                         reason: "系统音频设备发生变化",
                         allowsMenuInteraction: self.canInteractWithSoundMenu,
-                        refreshSnapshotBeforeEvaluation: self.canInteractWithSoundMenu
+                        refreshSnapshotBeforeEvaluation: false
                     )
                 }
             }

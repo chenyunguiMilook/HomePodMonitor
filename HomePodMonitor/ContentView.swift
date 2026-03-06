@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var controller: AudioDeviceController
+    @State private var hoveredTarget: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -41,7 +42,32 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(controller.availableTargets, id: \.self) { target in
-                        Text(target)
+                        HStack(spacing: 8) {
+                            Text(target)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 8)
+
+                            if controller.preferredTargetName == target {
+                                Text("默认输出")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            } else if hoveredTarget == target {
+                                Button("设为默认输出") {
+                                    controller.setPreferredTarget(named: target)
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onHover { isHovering in
+                            if isHovering {
+                                hoveredTarget = target
+                            } else if hoveredTarget == target {
+                                hoveredTarget = nil
+                            }
+                        }
                     }
                 }
             }
@@ -86,7 +112,7 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .frame(width: 300)
+        .frame(width: 340)
     }
 }
 

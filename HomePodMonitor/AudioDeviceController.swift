@@ -13,13 +13,15 @@ import ServiceManagement
 
 @MainActor
 final class AudioDeviceController: ObservableObject {
-    private static let preferredHomePodNames = ["家庭影院"]
+    private static let defaultPreferredTargetName = "家庭影院"
+    private static let preferredTargetDefaultsKey = "preferredTargetName"
 
     @Published private(set) var currentOutputName = "未检测到输出设备"
     @Published private(set) var availableTargets: [String] = []
     @Published private(set) var isHomePodActive = false
     @Published private(set) var statusMessage = "正在初始化..."
     @Published private(set) var accessibilityEnabled = false
+    @Published private(set) var preferredTargetName: String
     @Published var launchAtLoginEnabled = false
 
     private let monitorInterval: TimeInterval = 8
@@ -29,11 +31,13 @@ final class AudioDeviceController: ObservableObject {
     private var lastAttemptDate = Date.distantPast
     private let switchCooldown: TimeInterval = 10
     private let soundOutputAccessibility = SoundOutputAccessibility()
+    private let userDefaults = UserDefaults.standard
     private var automationTask: Task<Void, Never>?
     private var lastConfirmedTargetName: String?
     private var lastConfirmedTargetDate = Date.distantPast
 
     init() {
+        preferredTargetName = Self.loadPreferredTargetName()
         refreshLaunchAtLoginState()
         startMonitoring()
     }
@@ -52,6 +56,20 @@ final class AudioDeviceController: ObservableObject {
 
     func forceSwitchToHomePod() {
         evaluateAudioRoute(reason: "用户手动触发", forceSwitch: true)
+    }
+
+    func setPreferredTarget(named name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            return
+        }
+
+        preferredTargetName = trimmedName
+        userDefaults.set(trimmedName, forKey: Self.preferredTargetDefaultsKey)
+        lastConfirmedTargetName = nil
+        lastConfirmedTargetDate = Date.distantPast
+        isHomePodActive = Self.isPreferredTargetName(currentOutputName, preferredName: trimmedName)
+        statusMessage = "已将 \(trimmedName) 设为默认检测设备"
     }
 
     func setLaunchAtLogin(enabled: Bool) {
@@ -94,18 +112,20 @@ final class AudioDeviceController: ObservableObject {
     }
 
     var preferredTargetDescription: String {
-        Self.preferredHomePodNames.joined(separator: "、")
+        preferredTargetName
     }
 
     private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false) {
         accessibilityEnabled = soundOutputAccessibility.isTrusted()
 
         let currentOutput = Self.currentOutputDeviceName()
+        let preferredTargetName = preferredTargetName
         currentOutputName = currentOutput
-        isHomePodActive = Self.isTargetHomePodName(currentOutput)
+        isHomePodActive = Self.isPreferredTargetName(currentOutput, preferredName: preferredTargetName)
 
         if !isHomePodActive,
            let lastConfirmedTargetName,
+           Self.isPreferredTargetName(lastConfirmedTargetName, preferredName: preferredTargetName),
            Date().timeIntervalSince(lastConfirmedTargetDate) < trustedSelectionLifetime {
             currentOutputName = lastConfirmedTargetName
             isHomePodActive = true
@@ -144,7 +164,7 @@ final class AudioDeviceController: ObservableObject {
 
             do {
                 let snapshot = try self.soundOutputAccessibility.ensurePreferredOutputSelected(
-                    preferredNames: Self.preferredHomePodNames
+                    preferredNames: [preferredTargetName]
                 )
 
                 await MainActor.run {
@@ -152,7 +172,7 @@ final class AudioDeviceController: ObservableObject {
                     self.availableTargets = snapshot.outputs
 
                     if let selectedOutput = snapshot.selectedOutput,
-                       Self.isTargetHomePodName(selectedOutput) {
+                       Self.isPreferredTargetName(selectedOutput, preferredName: preferredTargetName) {
                         self.lastConfirmedTargetName = selectedOutput
                         self.lastConfirmedTargetDate = Date()
                         self.currentOutputName = selectedOutput
@@ -217,12 +237,17 @@ final class AudioDeviceController: ObservableObject {
         }
     }
 
-    private static func isTargetHomePodName(_ name: String) -> Bool {
-        if preferredHomePodNames.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
-            return true
+    private static func isPreferredTargetName(_ name: String, preferredName: String) -> Bool {
+        preferredName.caseInsensitiveCompare(name) == .orderedSame
+    }
+
+    private static func loadPreferredTargetName() -> String {
+        let storedName = UserDefaults.standard.string(forKey: preferredTargetDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let storedName, !storedName.isEmpty {
+            return storedName
         }
 
-        return name.localizedCaseInsensitiveContains("HomePod")
+        return defaultPreferredTargetName
     }
 
     private static func fetchOutputDevices() -> [(id: AudioDeviceID, name: String)] {

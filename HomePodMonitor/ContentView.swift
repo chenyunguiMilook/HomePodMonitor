@@ -12,6 +12,40 @@ struct ContentView: View {
     @ObservedObject var controller: AudioDeviceController
     @State private var hoveredTarget: String?
 
+    private func isCurrentOutput(_ target: String) -> Bool {
+        controller.currentOutputName.caseInsensitiveCompare(target) == .orderedSame
+    }
+
+    private func isPreferredTarget(_ target: String) -> Bool {
+        controller.preferredTargetName.caseInsensitiveCompare(target) == .orderedSame
+    }
+
+    private func isOutputTarget(_ target: String) -> Bool {
+        controller.availableTargets.contains { candidate in
+            candidate.caseInsensitiveCompare(target) == .orderedSame
+        }
+    }
+
+    private func iconColor(_ target: String) -> Color {
+        isCurrentOutput(target) ? .primary : .secondary
+    }
+
+    private func targetColor(_ target: String) -> Color {
+        guard isOutputTarget(target) else {
+            return iconColor(target)
+        }
+
+        if isPreferredTarget(target) {
+            return .green
+        }
+
+        if isCurrentOutput(target) {
+            return .blue
+        }
+
+        return iconColor(target)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
@@ -25,14 +59,6 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("当前输出")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(controller.currentOutputName)
-                    .font(.headline)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
                 Text("声音菜单中的可用输出")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -42,25 +68,36 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(controller.availableTargets, id: \.self) { target in
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
+                            Image(systemName: isCurrentOutput(target) ? "checkmark" : "speaker.wave.2.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(iconColor(target))
+                                .frame(width: 14)
+
                             Text(target)
                                 .lineLimit(1)
+                                .foregroundStyle(targetColor(target))
 
                             Spacer(minLength: 8)
 
-                            if controller.preferredTargetName == target {
+                            if isPreferredTarget(target) {
                                 Text("默认输出")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
                             } else if hoveredTarget == target {
                                 Button("设为默认输出") {
-                                    controller.setPreferredTarget(named: target)
+                                    controller.setPreferredTargetAndSwitch(named: target)
                                 }
                                 .buttonStyle(.borderless)
                                 .font(.caption)
                             }
                         }
-                        .contentShape(Rectangle())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(isCurrentOutput(target) ? Color.primary.opacity(0.12) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .onHover { isHovering in
                             if isHovering {
                                 hoveredTarget = target
@@ -101,11 +138,6 @@ struct ContentView: View {
                     set: { controller.setLaunchAtLogin(enabled: $0) }
                 )
             )
-
-            Button("立即切换到目标设备") {
-                controller.forceSwitchToHomePod()
-            }
-            .disabled(!controller.accessibilityEnabled)
 
             Button("退出") {
                 NSApplication.shared.terminate(nil)

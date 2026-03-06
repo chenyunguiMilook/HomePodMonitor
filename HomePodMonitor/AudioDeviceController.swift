@@ -71,6 +71,11 @@ final class AudioDeviceController: ObservableObject {
         statusMessage = "已将 \(trimmedName) 设为默认检测设备"
     }
 
+    func setPreferredTargetAndSwitch(named name: String) {
+        setPreferredTarget(named: name)
+        evaluateAudioRoute(reason: "用户更新默认输出", forceSwitch: true, allowsMenuInteraction: true)
+    }
+
     func setLaunchAtLogin(enabled: Bool) {
         do {
             if enabled {

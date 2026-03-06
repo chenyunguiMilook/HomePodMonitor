@@ -9,9 +9,17 @@ import SwiftUI
 
 @main
 struct HomePodMonitorApp: App {
+    @StateObject private var controller = AudioDeviceController()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            ContentView(controller: controller)
+        } label: {
+            Label(
+                "HomePod Monitor",
+                systemImage: controller.isHomePodActive ? "homepod.fill" : "homepod"
+            )
         }
+        .menuBarExtraStyle(.window)
     }
 }

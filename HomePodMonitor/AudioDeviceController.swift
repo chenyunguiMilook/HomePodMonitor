@@ -25,7 +25,6 @@ final class AudioDeviceController: ObservableObject {
     @Published var launchAtLoginEnabled = false
 
     private let monitorInterval: TimeInterval = 8
-    private let trustedSelectionLifetime: TimeInterval = 60
     private var monitorTimer: Timer?
     private var hasInstalledListeners = false
     private var lastAttemptDate = Date.distantPast
@@ -33,9 +32,8 @@ final class AudioDeviceController: ObservableObject {
     private let soundOutputAccessibility = SoundOutputAccessibility()
     private let userDefaults = UserDefaults.standard
     private var automationTask: Task<Void, Never>?
-    private var lastConfirmedTargetName: String?
-    private var lastConfirmedTargetDate = Date.distantPast
-    private var lastObservedOutputName = ""
+    private var lastSelectedMenuOutputName: String?
+    private var lastObservedSystemOutputName = ""
 
     init() {
         preferredTargetName = Self.loadPreferredTargetName()
@@ -65,8 +63,7 @@ final class AudioDeviceController: ObservableObject {
 
         preferredTargetName = trimmedName
         userDefaults.set(trimmedName, forKey: Self.preferredTargetDefaultsKey)
-        lastConfirmedTargetName = nil
-        lastConfirmedTargetDate = Date.distantPast
+        lastSelectedMenuOutputName = nil
         isHomePodActive = Self.isPreferredTargetName(currentOutputName, preferredName: trimmedName)
         statusMessage = "已将 \(trimmedName) 设为默认检测设备"
     }
@@ -122,31 +119,30 @@ final class AudioDeviceController: ObservableObject {
     private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false, allowsMenuInteraction: Bool) {
         accessibilityEnabled = soundOutputAccessibility.isTrusted()
 
-        let currentOutput = Self.currentOutputDeviceName()
+        let systemOutput = Self.currentOutputDeviceName()
         let preferredTargetName = preferredTargetName
-        let outputChanged = currentOutput != lastObservedOutputName
-        lastObservedOutputName = currentOutput
-        currentOutputName = currentOutput
-        isHomePodActive = Self.isPreferredTargetName(currentOutput, preferredName: preferredTargetName)
+        let outputChanged = systemOutput != lastObservedSystemOutputName
+        lastObservedSystemOutputName = systemOutput
 
-        if !isHomePodActive,
-           let lastConfirmedTargetName,
-           Self.isPreferredTargetName(lastConfirmedTargetName, preferredName: preferredTargetName),
-           Date().timeIntervalSince(lastConfirmedTargetDate) < trustedSelectionLifetime {
-            currentOutputName = lastConfirmedTargetName
-            isHomePodActive = true
-            statusMessage = "当前输出已经是目标设备 \(lastConfirmedTargetName)"
-            return
+        if accessibilityEnabled,
+           allowsMenuInteraction,
+           automationTask == nil {
+            refreshOutputSnapshotCache()
         }
 
+        let resolvedOutput = resolvedCurrentOutputName(systemOutputName: systemOutput)
+        currentOutputName = resolvedOutput
+        isHomePodActive = Self.isPreferredTargetName(resolvedOutput, preferredName: preferredTargetName)
+
         guard forceSwitch || !isHomePodActive else {
-            statusMessage = "当前输出已经是目标设备 \(currentOutput)"
+            statusMessage = "当前输出已经是目标设备 \(resolvedOutput)"
             return
         }
 
         if !allowsMenuInteraction {
             updateAvailableTargetsFromVisibleSnapshotIfNeeded()
-            statusMessage = outputChanged ? "当前输出已变为 \(currentOutput)，等待系统事件或手动切换" : "当前输出不是目标设备 \(currentOutput)"
+            let displayedOutput = currentOutputName
+            statusMessage = outputChanged ? "当前输出已变为 \(displayedOutput)，等待系统事件或手动切换" : "当前输出不是目标设备 \(displayedOutput)"
             return
         }
 
@@ -181,17 +177,14 @@ final class AudioDeviceController: ObservableObject {
 
                 await MainActor.run {
                     self.automationTask = nil
-                    self.availableTargets = snapshot.outputs
+                    self.updateSnapshotCache(snapshot)
 
                     if let selectedOutput = snapshot.selectedOutput,
                        Self.isPreferredTargetName(selectedOutput, preferredName: preferredTargetName) {
-                        self.lastConfirmedTargetName = selectedOutput
-                        self.lastConfirmedTargetDate = Date()
                         self.currentOutputName = selectedOutput
                         self.isHomePodActive = true
                         self.statusMessage = "已切换到 \(selectedOutput) · \(reason)"
                     } else {
-                        self.lastConfirmedTargetName = nil
                         self.isHomePodActive = false
                         self.statusMessage = "已发起切换，但系统尚未确认目标输出"
                     }
@@ -201,14 +194,17 @@ final class AudioDeviceController: ObservableObject {
 
                 await MainActor.run {
                     self.automationTask = nil
-                    self.availableTargets = snapshot?.outputs ?? []
-                    self.lastConfirmedTargetName = nil
+                    if let snapshot {
+                        self.updateSnapshotCache(snapshot)
+                    } else {
+                        self.lastSelectedMenuOutputName = nil
+                        self.availableTargets = []
+                    }
                     self.statusMessage = error.errorDescription ?? "切换失败"
                 }
             } catch {
                 await MainActor.run {
                     self.automationTask = nil
-                    self.lastConfirmedTargetName = nil
                     self.statusMessage = "切换失败: \(error.localizedDescription)"
                 }
             }
@@ -225,8 +221,39 @@ final class AudioDeviceController: ObservableObject {
         }
 
         if let snapshot = try? soundOutputAccessibility.readVisibleSnapshot() {
-            availableTargets = snapshot.outputs
+            updateSnapshotCache(snapshot)
         }
+    }
+
+    private func refreshOutputSnapshotCache() {
+        guard let snapshot = try? soundOutputAccessibility.readSnapshot() else {
+            return
+        }
+
+        updateSnapshotCache(snapshot)
+    }
+
+    private func updateSnapshotCache(_ snapshot: SoundOutputSnapshot) {
+        availableTargets = snapshot.outputs
+        lastSelectedMenuOutputName = snapshot.selectedOutput
+    }
+
+    private func resolvedCurrentOutputName(systemOutputName: String) -> String {
+        let normalizedSystemOutput = systemOutputName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSystemOutput.isEmpty else {
+            return lastSelectedMenuOutputName ?? systemOutputName
+        }
+
+        if availableTargets.contains(where: { $0.caseInsensitiveCompare(normalizedSystemOutput) == .orderedSame }) {
+            return normalizedSystemOutput
+        }
+
+        if let lastSelectedMenuOutputName,
+           !lastSelectedMenuOutputName.isEmpty {
+            return lastSelectedMenuOutputName
+        }
+
+        return normalizedSystemOutput
     }
 
     private func installAudioListenersIfNeeded() {

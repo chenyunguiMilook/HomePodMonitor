@@ -49,7 +49,7 @@ final class SoundOutputAccessibility: @unchecked Sendable {
         "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.extension?Privacy_Accessibility"
     ]
 
-    func isTrusted(prompt: Bool = false) -> Bool {
+    nonisolated func isTrusted(prompt: Bool = false) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }

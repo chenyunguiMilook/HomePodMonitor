@@ -32,9 +32,15 @@ final class AudioDeviceController: ObservableObject {
     private let switchCooldown: TimeInterval = 10
     private let soundOutputAccessibility = SoundOutputAccessibility()
     private let userDefaults = UserDefaults.standard
+    private let audioListenerQueue = DispatchQueue(label: "HomePodMonitor.AudioListener")
+    private let menuInteractionResumeDelay: TimeInterval = 2.5
     private var automationTask: Task<Void, Never>?
+    private var pendingResumeEvaluationTask: Task<Void, Never>?
+    private var isSnapshotRefreshInFlight = false
     private var lastSelectedMenuOutputName: String?
     private var lastObservedSystemOutputName = ""
+    private var lastSystemResumeDate = Date.distantPast
+    private var workspaceObservers = Set<AnyCancellable>()
 
     init() {
         preferredTargetName = Self.loadPreferredTargetName()
@@ -43,16 +49,28 @@ final class AudioDeviceController: ObservableObject {
     }
 
     func startMonitoring() {
+        installWorkspaceObserversIfNeeded()
         installAudioListenersIfNeeded()
-        evaluateAudioRoute(reason: "应用已启动", allowsMenuInteraction: true)
+        evaluateAudioRoute(
+            reason: "应用已启动",
+            allowsMenuInteraction: canInteractWithSoundMenu,
+            refreshSnapshotBeforeEvaluation: canInteractWithSoundMenu
+        )
 
         monitorTimer?.invalidate()
         monitorTimer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { [weak self] _ in
-            self?.evaluateAudioRoute(
-                reason: "定时巡检",
-                allowsMenuInteraction: true,
-                refreshSnapshotBeforeEvaluation: false
-            )
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+
+                let canInteractWithSoundMenu = self.canInteractWithSoundMenu
+                self.evaluateAudioRoute(
+                    reason: "定时巡检",
+                    allowsMenuInteraction: canInteractWithSoundMenu,
+                    refreshSnapshotBeforeEvaluation: canInteractWithSoundMenu
+                )
+            }
         }
     }
 
@@ -130,7 +148,8 @@ final class AudioDeviceController: ObservableObject {
             return
         }
 
-        refreshOutputSnapshotCache()
+        outputListStatus = "正在读取输出列表..."
+        beginSnapshotRefresh()
     }
 
     var preferredTargetDescription: String {
@@ -144,6 +163,7 @@ final class AudioDeviceController: ObservableObject {
         refreshSnapshotBeforeEvaluation: Bool = true
     ) {
         refreshAccessibilityStatus()
+        let menuInteractionAllowedNow = allowsMenuInteraction && canInteractWithSoundMenu
 
         let systemOutput = Self.currentOutputDeviceName()
         let preferredTargetName = preferredTargetName
@@ -151,10 +171,11 @@ final class AudioDeviceController: ObservableObject {
         lastObservedSystemOutputName = systemOutput
 
         if accessibilityEnabled,
-           allowsMenuInteraction,
+           menuInteractionAllowedNow,
            refreshSnapshotBeforeEvaluation,
-           automationTask == nil {
-            refreshOutputSnapshotCache()
+           automationTask == nil,
+           !isSnapshotRefreshInFlight {
+            beginSnapshotRefresh()
         }
 
         let resolvedOutput = resolvedCurrentOutputName(systemOutputName: systemOutput)
@@ -166,10 +187,14 @@ final class AudioDeviceController: ObservableObject {
             return
         }
 
-        if !allowsMenuInteraction {
-            updateAvailableTargetsFromVisibleSnapshotIfNeeded()
+        if !menuInteractionAllowedNow {
             let displayedOutput = currentOutputName
-            statusMessage = outputChanged ? "当前输出已变为 \(displayedOutput)，等待系统事件或手动切换" : "当前输出不是目标设备 \(displayedOutput)"
+            if accessibilityEnabled, !canInteractWithSoundMenu {
+                statusMessage = "系统刚恢复，等待声音菜单稳定后再检查 \(preferredTargetDescription)"
+                schedulePostResumeEvaluationIfNeeded(trigger: reason)
+            } else {
+                statusMessage = outputChanged ? "当前输出已变为 \(displayedOutput)，等待系统事件或手动切换" : "当前输出不是目标设备 \(displayedOutput)"
+            }
             return
         }
 
@@ -242,38 +267,49 @@ final class AudioDeviceController: ObservableObject {
         }
     }
 
-    private func updateAvailableTargetsFromVisibleSnapshotIfNeeded() {
-        guard accessibilityEnabled else {
+    private func beginSnapshotRefresh(visibleOnly: Bool = false) {
+        guard !isSnapshotRefreshInFlight else {
             return
         }
 
-        guard automationTask == nil else {
-            return
-        }
+        isSnapshotRefreshInFlight = true
+        let soundOutputAccessibility = soundOutputAccessibility
 
-        do {
-            if let snapshot = try soundOutputAccessibility.readVisibleSnapshot() {
-                updateSnapshotCache(snapshot)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result: Result<SoundOutputSnapshot?, Error>
+
+            do {
+                if visibleOnly {
+                    result = .success(try soundOutputAccessibility.readVisibleSnapshot())
+                } else {
+                    result = .success(try soundOutputAccessibility.readSnapshot())
+                }
+            } catch {
+                result = .failure(error)
             }
-        } catch let error as SoundOutputAccessibilityError {
-            outputListStatus = error.errorDescription ?? "读取输出列表失败"
-        } catch {
-            outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
-        }
-    }
 
-    private func refreshOutputSnapshotCache() {
-        do {
-            let snapshot = try soundOutputAccessibility.readSnapshot()
-            updateSnapshotCache(snapshot)
-        } catch let error as SoundOutputAccessibilityError {
-            availableTargets = []
-            lastSelectedMenuOutputName = nil
-            outputListStatus = error.errorDescription ?? "读取输出列表失败"
-        } catch {
-            availableTargets = []
-            lastSelectedMenuOutputName = nil
-            outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
+            Task { @MainActor [weak self, result] in
+                guard let self else {
+                    return
+                }
+
+                self.isSnapshotRefreshInFlight = false
+
+                switch result {
+                case let .success(snapshot?):
+                    self.updateSnapshotCache(snapshot)
+                case .success(nil):
+                    break
+                case let .failure(error as SoundOutputAccessibilityError):
+                    self.availableTargets = []
+                    self.lastSelectedMenuOutputName = nil
+                    self.outputListStatus = error.errorDescription ?? "读取输出列表失败"
+                case let .failure(error):
+                    self.availableTargets = []
+                    self.lastSelectedMenuOutputName = nil
+                    self.outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -326,11 +362,87 @@ final class AudioDeviceController: ObservableObject {
             AudioObjectAddPropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject),
                 &property,
-                .main
+                audioListenerQueue
             ) { [weak self] _, _ in
-                self?.evaluateAudioRoute(reason: "系统音频设备发生变化", allowsMenuInteraction: true)
+                Task { @MainActor [weak self] in
+                    guard let self else {
+                        return
+                    }
+
+                    self.evaluateAudioRoute(
+                        reason: "系统音频设备发生变化",
+                        allowsMenuInteraction: self.canInteractWithSoundMenu,
+                        refreshSnapshotBeforeEvaluation: self.canInteractWithSoundMenu
+                    )
+                }
             }
         }
+    }
+
+    private func installWorkspaceObserversIfNeeded() {
+        guard workspaceObservers.isEmpty else {
+            return
+        }
+
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        let resumeNotifications = [
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification
+        ]
+
+        for notification in resumeNotifications {
+            notificationCenter.publisher(for: notification)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.handleSystemResume(trigger: notification.rawValue)
+                }
+                .store(in: &workspaceObservers)
+        }
+    }
+
+    private var canInteractWithSoundMenu: Bool {
+        Date().timeIntervalSince(lastSystemResumeDate) >= menuInteractionResumeDelay
+    }
+
+    private func handleSystemResume(trigger: String) {
+        lastSystemResumeDate = Date()
+        pendingResumeEvaluationTask?.cancel()
+
+        evaluateAudioRoute(
+            reason: "系统恢复",
+            allowsMenuInteraction: false,
+            refreshSnapshotBeforeEvaluation: false
+        )
+
+        schedulePostResumeEvaluationIfNeeded(trigger: trigger)
+    }
+
+    private func schedulePostResumeEvaluationIfNeeded(trigger: String) {
+        guard accessibilityEnabled else {
+            return
+        }
+
+        pendingResumeEvaluationTask?.cancel()
+        pendingResumeEvaluationTask = Task { [weak self] in
+            let resumeDelay = self?.menuInteractionResumeDelay ?? 0
+            let delay = UInt64(resumeDelay * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: delay)
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            self?.runPostResumeEvaluation(trigger: trigger)
+        }
+    }
+
+    private func runPostResumeEvaluation(trigger: String) {
+        pendingResumeEvaluationTask = nil
+        evaluateAudioRoute(
+            reason: "系统恢复后检查",
+            allowsMenuInteraction: true,
+            refreshSnapshotBeforeEvaluation: true
+        )
     }
 
     private static func isPreferredTargetName(_ name: String, preferredName: String) -> Bool {
@@ -441,10 +553,13 @@ final class AudioDeviceController: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        var name: CFString = "" as CFString
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-        let status = AudioObjectGetPropertyData(deviceID, &propertyAddress, 0, nil, &dataSize, &name)
-        guard status == noErr else {
+        var name: CFString?
+        var dataSize = UInt32(MemoryLayout<CFString?>.size)
+        let status = withUnsafeMutablePointer(to: &name) { namePointer in
+            AudioObjectGetPropertyData(deviceID, &propertyAddress, 0, nil, &dataSize, namePointer)
+        }
+
+        guard status == noErr, let name else {
             return nil
         }
 

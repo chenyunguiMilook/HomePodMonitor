@@ -48,7 +48,11 @@ final class AudioDeviceController: ObservableObject {
 
         monitorTimer?.invalidate()
         monitorTimer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { [weak self] _ in
-            self?.evaluateAudioRoute(reason: "定时巡检", allowsMenuInteraction: false)
+            self?.evaluateAudioRoute(
+                reason: "定时巡检",
+                allowsMenuInteraction: true,
+                refreshSnapshotBeforeEvaluation: false
+            )
         }
     }
 
@@ -133,7 +137,12 @@ final class AudioDeviceController: ObservableObject {
         preferredTargetName
     }
 
-    private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false, allowsMenuInteraction: Bool) {
+    private func evaluateAudioRoute(
+        reason: String,
+        forceSwitch: Bool = false,
+        allowsMenuInteraction: Bool,
+        refreshSnapshotBeforeEvaluation: Bool = true
+    ) {
         refreshAccessibilityStatus()
 
         let systemOutput = Self.currentOutputDeviceName()
@@ -143,6 +152,7 @@ final class AudioDeviceController: ObservableObject {
 
         if accessibilityEnabled,
            allowsMenuInteraction,
+           refreshSnapshotBeforeEvaluation,
            automationTask == nil {
             refreshOutputSnapshotCache()
         }

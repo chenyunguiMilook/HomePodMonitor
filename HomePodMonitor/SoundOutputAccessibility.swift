@@ -40,7 +40,7 @@ enum SoundOutputAccessibilityError: LocalizedError {
     }
 }
 
-final class SoundOutputAccessibility {
+final class SoundOutputAccessibility: @unchecked Sendable {
     private let controlCenterBundleIdentifier = "com.apple.controlcenter"
     private let soundMenuIdentifier = "com.apple.menuextra.sound"
     private let accessibilitySettingsURLs = [
@@ -68,13 +68,26 @@ final class SoundOutputAccessibility {
         return false
     }
 
-    func readSnapshot() throws -> SoundOutputSnapshot {
+    nonisolated func readSnapshot() throws -> SoundOutputSnapshot {
         try withSoundPopup { window in
             parseSnapshot(from: window)
         }
     }
 
-    func ensurePreferredOutputSelected(preferredNames: [String]) throws -> SoundOutputSnapshot {
+    nonisolated func readVisibleSnapshot() throws -> SoundOutputSnapshot? {
+        guard isTrusted() else {
+            throw SoundOutputAccessibilityError.accessibilityPermissionRequired
+        }
+
+        let applicationElement = try controlCenterApplicationElement()
+        guard let popupWindow = currentPopupWindow(in: applicationElement) else {
+            return nil
+        }
+
+        return parseSnapshot(from: popupWindow)
+    }
+
+    nonisolated func ensurePreferredOutputSelected(preferredNames: [String]) throws -> SoundOutputSnapshot {
         try withSoundPopup { window in
             var snapshot = parseSnapshot(from: window)
             if let selectedOutput = snapshot.selectedOutput,
@@ -102,16 +115,12 @@ final class SoundOutputAccessibility {
         }
     }
 
-    private func withSoundPopup<T>(_ action: (AXUIElement) throws -> T) throws -> T {
+    private nonisolated func withSoundPopup<T>(_ action: (AXUIElement) throws -> T) throws -> T {
         guard isTrusted() else {
             throw SoundOutputAccessibilityError.accessibilityPermissionRequired
         }
 
-        guard let controlCenterApp = NSRunningApplication.runningApplications(withBundleIdentifier: controlCenterBundleIdentifier).first else {
-            throw SoundOutputAccessibilityError.controlCenterUnavailable
-        }
-
-        let applicationElement = AXUIElementCreateApplication(controlCenterApp.processIdentifier)
+        let applicationElement = try controlCenterApplicationElement()
         guard let soundMenuItem = findSoundMenuItem(in: applicationElement) else {
             throw SoundOutputAccessibilityError.soundMenuUnavailable
         }
@@ -137,7 +146,15 @@ final class SoundOutputAccessibility {
         return try action(popupWindow)
     }
 
-    private func waitForPopup(in applicationElement: AXUIElement) -> AXUIElement? {
+    private nonisolated func controlCenterApplicationElement() throws -> AXUIElement {
+        guard let controlCenterApp = NSRunningApplication.runningApplications(withBundleIdentifier: controlCenterBundleIdentifier).first else {
+            throw SoundOutputAccessibilityError.controlCenterUnavailable
+        }
+
+        return AXUIElementCreateApplication(controlCenterApp.processIdentifier)
+    }
+
+    private nonisolated func waitForPopup(in applicationElement: AXUIElement) -> AXUIElement? {
         for _ in 0..<12 {
             if let popup = currentPopupWindow(in: applicationElement) {
                 return popup
@@ -149,7 +166,7 @@ final class SoundOutputAccessibility {
         return nil
     }
 
-    private func currentPopupWindow(in applicationElement: AXUIElement) -> AXUIElement? {
+    private nonisolated func currentPopupWindow(in applicationElement: AXUIElement) -> AXUIElement? {
         guard let windows = copyAttribute(kAXWindowsAttribute, from: applicationElement) as? [AXUIElement] else {
             return nil
         }
@@ -157,7 +174,7 @@ final class SoundOutputAccessibility {
         return windows.first
     }
 
-    private func findSoundMenuItem(in applicationElement: AXUIElement) -> AXUIElement? {
+    private nonisolated func findSoundMenuItem(in applicationElement: AXUIElement) -> AXUIElement? {
         guard let extrasMenuBarObject = copyAttribute("AXExtrasMenuBar", from: applicationElement) else {
             return nil
         }
@@ -174,7 +191,7 @@ final class SoundOutputAccessibility {
         }
     }
 
-    private func findOutputCheckbox(named name: String, in window: AXUIElement) -> AXUIElement? {
+    private nonisolated func findOutputCheckbox(named name: String, in window: AXUIElement) -> AXUIElement? {
         allDescendants(of: window).first { element in
             guard stringValue(of: kAXRoleAttribute, from: element) == kAXCheckBoxRole else {
                 return false
@@ -186,7 +203,7 @@ final class SoundOutputAccessibility {
         }
     }
 
-    private func parseSnapshot(from window: AXUIElement) -> SoundOutputSnapshot {
+    private nonisolated func parseSnapshot(from window: AXUIElement) -> SoundOutputSnapshot {
         let outputCheckboxes = allDescendants(of: window).filter { element in
             guard stringValue(of: kAXRoleAttribute, from: element) == kAXCheckBoxRole else {
                 return false
@@ -209,7 +226,7 @@ final class SoundOutputAccessibility {
         return SoundOutputSnapshot(outputs: outputs, selectedOutput: selectedOutput)
     }
 
-    private func allDescendants(of root: AXUIElement) -> [AXUIElement] {
+    private nonisolated func allDescendants(of root: AXUIElement) -> [AXUIElement] {
         var results: [AXUIElement] = []
         var queue: [AXUIElement] = [root]
 
@@ -225,7 +242,7 @@ final class SoundOutputAccessibility {
         return results
     }
 
-    private func copyAttribute(_ attribute: String, from element: AXUIElement) -> AnyObject? {
+    private nonisolated func copyAttribute(_ attribute: String, from element: AXUIElement) -> AnyObject? {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard status == .success else {
@@ -235,7 +252,7 @@ final class SoundOutputAccessibility {
         return value
     }
 
-    private func stringValue(of attribute: String, from element: AXUIElement) -> String? {
+    private nonisolated func stringValue(of attribute: String, from element: AXUIElement) -> String? {
         if let string = copyAttribute(attribute, from: element) as? String {
             return string
         }
@@ -247,7 +264,7 @@ final class SoundOutputAccessibility {
         return nil
     }
 
-    private func intValue(of attribute: String, from element: AXUIElement) -> Int {
+    private nonisolated func intValue(of attribute: String, from element: AXUIElement) -> Int {
         if let number = copyAttribute(attribute, from: element) as? NSNumber {
             return number.intValue
         }

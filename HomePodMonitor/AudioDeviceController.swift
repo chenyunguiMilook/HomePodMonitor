@@ -35,6 +35,7 @@ final class AudioDeviceController: ObservableObject {
     private var automationTask: Task<Void, Never>?
     private var lastConfirmedTargetName: String?
     private var lastConfirmedTargetDate = Date.distantPast
+    private var lastObservedOutputName = ""
 
     init() {
         preferredTargetName = Self.loadPreferredTargetName()
@@ -44,18 +45,16 @@ final class AudioDeviceController: ObservableObject {
 
     func startMonitoring() {
         installAudioListenersIfNeeded()
-        evaluateAudioRoute(reason: "应用已启动")
+        evaluateAudioRoute(reason: "应用已启动", allowsMenuInteraction: true)
 
         monitorTimer?.invalidate()
         monitorTimer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.evaluateAudioRoute(reason: "定时巡检")
-            }
+            self?.evaluateAudioRoute(reason: "定时巡检", allowsMenuInteraction: false)
         }
     }
 
     func forceSwitchToHomePod() {
-        evaluateAudioRoute(reason: "用户手动触发", forceSwitch: true)
+        evaluateAudioRoute(reason: "用户手动触发", forceSwitch: true, allowsMenuInteraction: true)
     }
 
     func setPreferredTarget(named name: String) {
@@ -115,11 +114,13 @@ final class AudioDeviceController: ObservableObject {
         preferredTargetName
     }
 
-    private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false) {
+    private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false, allowsMenuInteraction: Bool) {
         accessibilityEnabled = soundOutputAccessibility.isTrusted()
 
         let currentOutput = Self.currentOutputDeviceName()
         let preferredTargetName = preferredTargetName
+        let outputChanged = currentOutput != lastObservedOutputName
+        lastObservedOutputName = currentOutput
         currentOutputName = currentOutput
         isHomePodActive = Self.isPreferredTargetName(currentOutput, preferredName: preferredTargetName)
 
@@ -135,6 +136,12 @@ final class AudioDeviceController: ObservableObject {
 
         guard forceSwitch || !isHomePodActive else {
             statusMessage = "当前输出已经是目标设备 \(currentOutput)"
+            return
+        }
+
+        if !allowsMenuInteraction {
+            updateAvailableTargetsFromVisibleSnapshotIfNeeded()
+            statusMessage = outputChanged ? "当前输出已变为 \(currentOutput)，等待系统事件或手动切换" : "当前输出不是目标设备 \(currentOutput)"
             return
         }
 
@@ -203,6 +210,20 @@ final class AudioDeviceController: ObservableObject {
         }
     }
 
+    private func updateAvailableTargetsFromVisibleSnapshotIfNeeded() {
+        guard accessibilityEnabled else {
+            return
+        }
+
+        guard automationTask == nil else {
+            return
+        }
+
+        if let snapshot = try? soundOutputAccessibility.readVisibleSnapshot() {
+            availableTargets = snapshot.outputs
+        }
+    }
+
     private func installAudioListenersIfNeeded() {
         guard !hasInstalledListeners else {
             return
@@ -230,9 +251,7 @@ final class AudioDeviceController: ObservableObject {
                 &property,
                 .main
             ) { [weak self] _, _ in
-                Task { @MainActor in
-                    self?.evaluateAudioRoute(reason: "系统音频设备发生变化")
-                }
+                self?.evaluateAudioRoute(reason: "系统音频设备发生变化", allowsMenuInteraction: true)
             }
         }
     }

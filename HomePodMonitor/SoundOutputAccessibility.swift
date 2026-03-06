@@ -43,6 +43,7 @@ enum SoundOutputAccessibilityError: LocalizedError {
 final class SoundOutputAccessibility: @unchecked Sendable {
     private let controlCenterBundleIdentifier = "com.apple.controlcenter"
     private let soundMenuIdentifier = "com.apple.menuextra.sound"
+    private let soundMenuKeywords = ["sound", "声音", "扬声器", "音频", "speaker"]
     private let accessibilitySettingsURLs = [
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.extension?Privacy_Accessibility"
@@ -180,14 +181,22 @@ final class SoundOutputAccessibility: @unchecked Sendable {
         }
 
         let extrasMenuBar = extrasMenuBarObject as! AXUIElement
-        guard let children = copyAttribute(kAXChildrenAttribute, from: extrasMenuBar) as? [AXUIElement] else {
-            return nil
-        }
+        return allDescendants(of: extrasMenuBar).first { element in
+            let identifier = stringValue(of: kAXIdentifierAttribute, from: element)?.lowercased() ?? ""
+            let description = stringValue(of: kAXDescriptionAttribute, from: element)?.lowercased() ?? ""
+            let title = stringValue(of: kAXTitleAttribute, from: element)?.lowercased() ?? ""
 
-        return children.first { element in
-            let identifier = stringValue(of: kAXIdentifierAttribute, from: element)
-            let description = stringValue(of: kAXDescriptionAttribute, from: element)
-            return identifier == soundMenuIdentifier || description == "声音"
+            if identifier == soundMenuIdentifier {
+                return true
+            }
+
+            if identifier.contains(".sound") || identifier.contains("audio") {
+                return true
+            }
+
+            return soundMenuKeywords.contains { keyword in
+                description.contains(keyword) || title.contains(keyword)
+            }
         }
     }
 

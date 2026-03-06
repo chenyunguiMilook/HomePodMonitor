@@ -20,6 +20,7 @@ final class AudioDeviceController: ObservableObject {
     @Published private(set) var availableTargets: [String] = []
     @Published private(set) var isHomePodActive = false
     @Published private(set) var statusMessage = "正在初始化..."
+    @Published private(set) var outputListStatus = "正在读取输出列表..."
     @Published private(set) var accessibilityEnabled = false
     @Published private(set) var preferredTargetName: String
     @Published var launchAtLoginEnabled = false
@@ -116,6 +117,18 @@ final class AudioDeviceController: ObservableObject {
         }
     }
 
+    func refreshAvailableTargets() {
+        refreshAccessibilityStatus()
+
+        guard accessibilityEnabled else {
+            availableTargets = []
+            outputListStatus = "未开启辅助功能权限"
+            return
+        }
+
+        refreshOutputSnapshotCache()
+    }
+
     var preferredTargetDescription: String {
         preferredTargetName
     }
@@ -151,6 +164,8 @@ final class AudioDeviceController: ObservableObject {
         }
 
         guard accessibilityEnabled else {
+            availableTargets = []
+            outputListStatus = "未开启辅助功能权限"
             statusMessage = "需要开启辅助功能权限后，才能自动切换到 \(preferredTargetDescription)"
             return
         }
@@ -203,12 +218,14 @@ final class AudioDeviceController: ObservableObject {
                     } else {
                         self.lastSelectedMenuOutputName = nil
                         self.availableTargets = []
+                        self.outputListStatus = error.errorDescription ?? "读取输出列表失败"
                     }
                     self.statusMessage = error.errorDescription ?? "切换失败"
                 }
             } catch {
                 await MainActor.run {
                     self.automationTask = nil
+                    self.outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
                     self.statusMessage = "切换失败: \(error.localizedDescription)"
                 }
             }
@@ -224,22 +241,36 @@ final class AudioDeviceController: ObservableObject {
             return
         }
 
-        if let snapshot = try? soundOutputAccessibility.readVisibleSnapshot() {
-            updateSnapshotCache(snapshot)
+        do {
+            if let snapshot = try soundOutputAccessibility.readVisibleSnapshot() {
+                updateSnapshotCache(snapshot)
+            }
+        } catch let error as SoundOutputAccessibilityError {
+            outputListStatus = error.errorDescription ?? "读取输出列表失败"
+        } catch {
+            outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
         }
     }
 
     private func refreshOutputSnapshotCache() {
-        guard let snapshot = try? soundOutputAccessibility.readSnapshot() else {
-            return
+        do {
+            let snapshot = try soundOutputAccessibility.readSnapshot()
+            updateSnapshotCache(snapshot)
+        } catch let error as SoundOutputAccessibilityError {
+            availableTargets = []
+            lastSelectedMenuOutputName = nil
+            outputListStatus = error.errorDescription ?? "读取输出列表失败"
+        } catch {
+            availableTargets = []
+            lastSelectedMenuOutputName = nil
+            outputListStatus = "读取输出列表失败: \(error.localizedDescription)"
         }
-
-        updateSnapshotCache(snapshot)
     }
 
     private func updateSnapshotCache(_ snapshot: SoundOutputSnapshot) {
         availableTargets = snapshot.outputs
         lastSelectedMenuOutputName = snapshot.selectedOutput
+        outputListStatus = snapshot.outputs.isEmpty ? "声音菜单里暂未发现可用输出" : "已读取到 \(snapshot.outputs.count) 个输出"
     }
 
     private func resolvedCurrentOutputName(systemOutputName: String) -> String {

@@ -102,12 +102,24 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("声音菜单中的可用输出")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 10) {
+                    Text("声音菜单中的可用输出")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    if controller.accessibilityEnabled {
+                        Button("刷新列表") {
+                            controller.refreshAvailableTargets()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                    }
+                }
 
                 if controller.availableTargets.isEmpty {
-                    Text(controller.accessibilityEnabled ? "暂未读取到输出列表" : "未开启辅助功能权限")
+                    Text(controller.outputListStatus)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(controller.availableTargets, id: \.self) { target in

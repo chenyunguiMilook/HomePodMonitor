@@ -93,9 +93,13 @@ final class AudioDeviceController: ObservableObject {
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     }
 
+    func refreshAccessibilityStatus() {
+        accessibilityEnabled = soundOutputAccessibility.isTrusted()
+    }
+
     func requestAccessibilityPermission() {
         let alreadyEnabled = soundOutputAccessibility.isTrusted(prompt: true)
-        accessibilityEnabled = alreadyEnabled
+        refreshAccessibilityStatus()
 
         if alreadyEnabled {
             statusMessage = "辅助功能权限已开启"
@@ -117,7 +121,7 @@ final class AudioDeviceController: ObservableObject {
     }
 
     private func evaluateAudioRoute(reason: String, forceSwitch: Bool = false, allowsMenuInteraction: Bool) {
-        accessibilityEnabled = soundOutputAccessibility.isTrusted()
+        refreshAccessibilityStatus()
 
         let systemOutput = Self.currentOutputDeviceName()
         let preferredTargetName = preferredTargetName

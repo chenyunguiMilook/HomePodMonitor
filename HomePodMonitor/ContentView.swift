@@ -46,6 +46,20 @@ struct ContentView: View {
         return iconColor(target)
     }
 
+    private var permissionTint: Color {
+        controller.accessibilityEnabled ? .green : .orange
+    }
+
+    private var permissionTitle: String {
+        controller.accessibilityEnabled ? "辅助功能权限已开启" : "辅助功能权限未开启"
+    }
+
+    private var permissionDescription: String {
+        controller.accessibilityEnabled
+        ? "已允许读取声音菜单状态并自动切换到目标输出。"
+        : "未授权时只能显示基础状态，无法自动读取声音菜单或切换到目标输出。"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
@@ -57,6 +71,35 @@ struct ContentView: View {
             Text("目标设备：\(controller.preferredTargetDescription)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label(permissionTitle, systemImage: controller.accessibilityEnabled ? "checkmark.shield.fill" : "lock.shield.fill")
+                    .foregroundStyle(permissionTint)
+
+                Text(permissionDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 10) {
+                    if controller.accessibilityEnabled {
+                        Button("刷新权限状态") {
+                            controller.refreshAccessibilityStatus()
+                        }
+                    } else {
+                        Button("打开辅助功能设置") {
+                            controller.openAccessibilitySettings()
+                        }
+
+                        Button("请求权限") {
+                            controller.requestAccessibilityPermission()
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(permissionTint.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("声音菜单中的可用输出")
@@ -112,22 +155,6 @@ struct ContentView: View {
             Text(controller.statusMessage)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            if !controller.accessibilityEnabled {
-                Text("要自动切换家庭影院，请到“系统设置 > 隐私与安全性 > 辅助功能”里打开 HomePodMonitor。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Button("打开辅助功能设置") {
-                        controller.openAccessibilitySettings()
-                    }
-
-                    Button("请求权限") {
-                        controller.requestAccessibilityPermission()
-                    }
-                }
-            }
 
             Divider()
 

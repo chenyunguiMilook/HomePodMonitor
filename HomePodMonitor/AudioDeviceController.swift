@@ -296,7 +296,14 @@ final class AudioDeviceController: ObservableObject {
 
                 switch result {
                 case let .success(snapshot?):
+                    let previousOutputName = self.currentOutputName
+                    let previousIsHomePodActive = self.isHomePodActive
                     self.updateSnapshotCache(snapshot)
+                    self.refreshResolvedOutputState()
+                    self.reconcilePostSnapshotRefresh(
+                        previousOutputName: previousOutputName,
+                        previousIsHomePodActive: previousIsHomePodActive
+                    )
                 case .success(nil):
                     break
                 case let .failure(error as SoundOutputAccessibilityError):
@@ -316,6 +323,35 @@ final class AudioDeviceController: ObservableObject {
         availableTargets = snapshot.outputs
         lastSelectedMenuOutputName = snapshot.selectedOutput
         outputListStatus = snapshot.outputs.isEmpty ? "声音菜单里暂未发现可用输出" : "已读取到 \(snapshot.outputs.count) 个输出"
+    }
+
+    private func refreshResolvedOutputState() {
+        let resolvedOutput = resolvedCurrentOutputName(systemOutputName: Self.currentOutputDeviceName())
+        currentOutputName = resolvedOutput
+        isHomePodActive = Self.isPreferredTargetName(resolvedOutput, preferredName: preferredTargetName)
+    }
+
+    private func reconcilePostSnapshotRefresh(
+        previousOutputName: String,
+        previousIsHomePodActive: Bool
+    ) {
+        guard accessibilityEnabled,
+              canInteractWithSoundMenu,
+              automationTask == nil,
+              !isHomePodActive else {
+            return
+        }
+
+        let outputChanged = previousOutputName.caseInsensitiveCompare(currentOutputName) != .orderedSame
+        guard previousIsHomePodActive || outputChanged else {
+            return
+        }
+
+        evaluateAudioRoute(
+            reason: "声音菜单状态已刷新",
+            allowsMenuInteraction: true,
+            refreshSnapshotBeforeEvaluation: false
+        )
     }
 
     private func resolvedCurrentOutputName(systemOutputName: String) -> String {

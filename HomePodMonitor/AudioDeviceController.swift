@@ -41,6 +41,7 @@ final class AudioDeviceController: ObservableObject {
     private var lastObservedSystemOutputName = ""
     private var lastSystemResumeDate = Date.distantPast
     private var workspaceObservers = Set<AnyCancellable>()
+    private let postWakeRetryDelays: [TimeInterval] = [3, 6, 12, 20, 30]
 
     init() {
         preferredTargetName = Self.loadPreferredTargetName()
@@ -421,6 +422,7 @@ final class AudioDeviceController: ObservableObject {
 
         let notificationCenter = NSWorkspace.shared.notificationCenter
         let resumeNotifications = [
+            NSWorkspace.didWakeNotification,
             NSWorkspace.screensDidWakeNotification,
             NSWorkspace.sessionDidBecomeActiveNotification
         ]
@@ -443,41 +445,60 @@ final class AudioDeviceController: ObservableObject {
         lastSystemResumeDate = Date()
         pendingResumeEvaluationTask?.cancel()
 
+        // 长时间睡眠后 Timer 可能不再触发，重建定时器确保巡检恢复
+        monitorTimer?.invalidate()
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.evaluateAudioRoute(
+                    reason: "定时巡检",
+                    allowsMenuInteraction: self.canInteractWithSoundMenu,
+                    refreshSnapshotBeforeEvaluation: false
+                )
+            }
+        }
+
         evaluateAudioRoute(
             reason: "系统恢复",
             allowsMenuInteraction: false,
             refreshSnapshotBeforeEvaluation: false
         )
 
-        schedulePostResumeEvaluationIfNeeded(trigger: trigger)
+        schedulePostResumeRetries(trigger: trigger)
     }
 
     private func schedulePostResumeEvaluationIfNeeded(trigger: String) {
+        schedulePostResumeRetries(trigger: trigger)
+    }
+
+    /// 唤醒后按渐进式延迟多次重试，覆盖 AirPlay/HomePod 缓慢重连的场景
+    private func schedulePostResumeRetries(trigger: String) {
         guard accessibilityEnabled else {
             return
         }
 
         pendingResumeEvaluationTask?.cancel()
         pendingResumeEvaluationTask = Task { [weak self] in
-            let resumeDelay = self?.menuInteractionResumeDelay ?? 0
-            let delay = UInt64(resumeDelay * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: delay)
+            guard let self else { return }
+            for delay in self.postWakeRetryDelays {
+                let nanoseconds = UInt64(delay * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
 
-            guard !Task.isCancelled else {
-                return
+                guard !Task.isCancelled else { return }
+
+                // 如果已经切换成功，停止后续重试
+                if self.isHomePodActive { return }
+
+                self.evaluateAudioRoute(
+                    reason: "系统恢复后第\(delay)s重试",
+                    allowsMenuInteraction: true,
+                    refreshSnapshotBeforeEvaluation: true
+                )
             }
 
-            self?.runPostResumeEvaluation(trigger: trigger)
+            guard !Task.isCancelled else { return }
+            self.pendingResumeEvaluationTask = nil
         }
-    }
-
-    private func runPostResumeEvaluation(trigger: String) {
-        pendingResumeEvaluationTask = nil
-        evaluateAudioRoute(
-            reason: "系统恢复后检查",
-            allowsMenuInteraction: true,
-            refreshSnapshotBeforeEvaluation: true
-        )
     }
 
     private static func isPreferredTargetName(_ name: String, preferredName: String) -> Bool {

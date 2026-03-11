@@ -41,7 +41,12 @@ final class AudioDeviceController: ObservableObject {
     private var lastObservedSystemOutputName = ""
     private var lastSystemResumeDate = Date.distantPast
     private var workspaceObservers = Set<AnyCancellable>()
-    private let postWakeRetryDelays: [TimeInterval] = [3, 6, 12, 20, 30]
+    private var distributedObservers = [NSObjectProtocol]()
+    private let postWakeRetryDelays: [TimeInterval] = [3, 6, 12, 20, 35, 55, 80]
+    private let postWakeShortRetryDelays: [TimeInterval] = [3, 6, 12, 20]
+    private var lastSleepDate = Date.distantPast
+    /// 睡眠超过此时长视为"长时间睡眠"，使用更激进的重试策略
+    private let longSleepThreshold: TimeInterval = 120
 
     init() {
         preferredTargetName = Self.loadPreferredTargetName()
@@ -435,6 +440,28 @@ final class AudioDeviceController: ObservableObject {
                 }
                 .store(in: &workspaceObservers)
         }
+
+        // 记录系统进入睡眠的时间，用于区分长/短睡眠
+        notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.lastSleepDate = Date()
+            }
+            .store(in: &workspaceObservers)
+
+        // 监听屏幕解锁（用户输入密码后），此时 AirPlay 设备才真正开始重连
+        if distributedObservers.isEmpty {
+            let screenUnlockObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleScreenUnlock()
+                }
+            }
+            distributedObservers.append(screenUnlockObserver)
+        }
     }
 
     private var canInteractWithSoundMenu: Bool {
@@ -442,8 +469,14 @@ final class AudioDeviceController: ObservableObject {
     }
 
     private func handleSystemResume(trigger: String) {
-        lastSystemResumeDate = Date()
+        let now = Date()
+        let sleepDuration = now.timeIntervalSince(lastSleepDate)
+        let isLongSleep = sleepDuration >= longSleepThreshold
+        lastSystemResumeDate = now
         pendingResumeEvaluationTask?.cancel()
+
+        // 清除可能已过期的缓存状态，避免误判
+        invalidateStaleCacheOnWake(isLongSleep: isLongSleep)
 
         // 长时间睡眠后 Timer 可能不再触发，重建定时器确保巡检恢复
         monitorTimer?.invalidate()
@@ -459,41 +492,77 @@ final class AudioDeviceController: ObservableObject {
         }
 
         evaluateAudioRoute(
-            reason: "系统恢复",
+            reason: isLongSleep ? "长时间睡眠后恢复" : "系统恢复",
             allowsMenuInteraction: false,
             refreshSnapshotBeforeEvaluation: false
         )
 
-        schedulePostResumeRetries(trigger: trigger)
+        schedulePostResumeRetries(trigger: trigger, extendedRetries: isLongSleep)
+    }
+
+    private func handleScreenUnlock() {
+        let now = Date()
+        let timeSinceResume = now.timeIntervalSince(lastSystemResumeDate)
+
+        // 如果距离上次恢复事件很近（< 5s），说明唤醒重试已在进行，不重复
+        guard timeSinceResume > 5 else { return }
+
+        // 屏幕解锁是一个独立事件；重置恢复窗口，清除过期缓存
+        lastSystemResumeDate = now
+        invalidateStaleCacheOnWake(isLongSleep: true)
+
+        schedulePostResumeRetries(trigger: "屏幕解锁", extendedRetries: true)
+    }
+
+    private func invalidateStaleCacheOnWake(isLongSleep: Bool) {
+        // 长睡眠后 AirPlay 设备可能已断开，旧快照不再可信
+        lastSelectedMenuOutputName = nil
+        isHomePodActive = false
+
+        if isLongSleep {
+            availableTargets = []
+            outputListStatus = "系统刚从睡眠恢复，等待重新读取..."
+        }
     }
 
     private func schedulePostResumeEvaluationIfNeeded(trigger: String) {
-        schedulePostResumeRetries(trigger: trigger)
+        schedulePostResumeRetries(trigger: trigger, extendedRetries: false)
     }
 
     /// 唤醒后按渐进式延迟多次重试，覆盖 AirPlay/HomePod 缓慢重连的场景
-    private func schedulePostResumeRetries(trigger: String) {
+    private func schedulePostResumeRetries(trigger: String, extendedRetries: Bool) {
         guard accessibilityEnabled else {
             return
         }
 
+        let delays = extendedRetries ? postWakeRetryDelays : postWakeShortRetryDelays
+
         pendingResumeEvaluationTask?.cancel()
         pendingResumeEvaluationTask = Task { [weak self] in
             guard let self else { return }
-            for delay in self.postWakeRetryDelays {
+            for delay in delays {
                 let nanoseconds = UInt64(delay * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
 
                 guard !Task.isCancelled else { return }
 
-                // 如果已经切换成功，停止后续重试
-                if self.isHomePodActive { return }
+                // 先强制从 CoreAudio 刷新当前输出，再判断是否已在目标设备上
+                // 避免陈旧的 isHomePodActive 缓存导致跳过重试
+                self.refreshResolvedOutputState()
+                if self.isHomePodActive {
+                    self.statusMessage = "已确认输出在目标设备 \(self.currentOutputName)"
+                    return
+                }
 
                 self.evaluateAudioRoute(
-                    reason: "系统恢复后第\(delay)s重试",
+                    reason: "\(trigger)后第\(Int(delay))s重试",
                     allowsMenuInteraction: true,
                     refreshSnapshotBeforeEvaluation: true
                 )
+
+                // 切换后等待短暂时间让系统生效，再进入下一轮检查
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
             }
 
             guard !Task.isCancelled else { return }

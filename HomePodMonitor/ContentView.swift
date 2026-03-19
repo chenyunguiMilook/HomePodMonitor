@@ -85,6 +85,11 @@ struct ContentView: View {
                         Button("刷新权限状态") {
                             controller.refreshAccessibilityStatus()
                         }
+
+                        Button(controller.isBackgroundSoundsAutomationInFlight ? "正在开启背景音..." : "开启背景音") {
+                            controller.enableBackgroundSounds()
+                        }
+                        .disabled(controller.isBackgroundSoundsAutomationInFlight)
                     } else {
                         Button("打开辅助功能设置") {
                             controller.openAccessibilitySettings()

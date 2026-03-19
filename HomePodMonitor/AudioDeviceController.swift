@@ -23,6 +23,7 @@ final class AudioDeviceController: ObservableObject {
     @Published private(set) var outputListStatus = "正在读取输出列表..."
     @Published private(set) var accessibilityEnabled = false
     @Published private(set) var preferredTargetName: String
+    @Published private(set) var isBackgroundSoundsAutomationInFlight = false
     @Published var launchAtLoginEnabled = false
 
     private let monitorInterval: TimeInterval = 8
@@ -141,6 +142,50 @@ final class AudioDeviceController: ObservableObject {
             statusMessage = "已打开系统设置，请在“隐私与安全性 > 辅助功能”中启用 HomePodMonitor"
         } else {
             statusMessage = "无法打开辅助功能设置，请手动前往“系统设置 > 隐私与安全性 > 辅助功能”"
+        }
+    }
+
+    func enableBackgroundSounds() {
+        refreshAccessibilityStatus()
+
+        guard accessibilityEnabled else {
+            statusMessage = "需要先开启辅助功能权限，才能自动启用背景音"
+            return
+        }
+
+        guard !isBackgroundSoundsAutomationInFlight else {
+            statusMessage = "正在尝试开启背景音..."
+            return
+        }
+
+        isBackgroundSoundsAutomationInFlight = true
+        statusMessage = "正在打开系统设置并尝试开启背景音..."
+
+        let soundOutputAccessibility = soundOutputAccessibility
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let result = try soundOutputAccessibility.ensureBackgroundSoundsEnabled()
+                await MainActor.run {
+                    self.isBackgroundSoundsAutomationInFlight = false
+                    self.statusMessage = result.alreadyEnabled
+                    ? "背景音已经是开启状态"
+                    : "已开启背景音"
+                }
+            } catch let error as SoundOutputAccessibilityError {
+                await MainActor.run {
+                    self.isBackgroundSoundsAutomationInFlight = false
+                    self.statusMessage = error.errorDescription ?? "开启背景音失败"
+                }
+            } catch {
+                await MainActor.run {
+                    self.isBackgroundSoundsAutomationInFlight = false
+                    self.statusMessage = "开启背景音失败: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
